@@ -43,6 +43,115 @@ static int looks_like_videowriter(void) {
     }
     return plausible>0;
 }
+
+/* ImageDisk (.IMD) sector loader. ImageDisk records may be out of track/sector
+ * order, use compressed filler bytes, and flag missing or CRC-bad sectors.
+ * No failed sector is ever represented to the filesystem as a valid zero sector.
+ */
+static unsigned char sector_status[1440]; /* 0 unreadable/absent, 1 reliable */
+static int image_is_imd=0;
+static int bad_sectors=0;
+static int sector_good(int lba) {
+    return lba>=0 && lba<1440 && sector_status[lba];
+}
+static int load_raw_image(FILE *f) {
+    if(fread(disk,1,SZ,f)!=SZ || fgetc(f)!=EOF) {
+        fprintf(stderr,"Invalid raw image size; expected %d bytes\n",SZ);
+        return 0;
+    }
+    memset(sector_status,1,sizeof sector_status);
+    return 1;
+}
+static int load_imd_image(FILE *f) {
+    int c,found_eof=0,tracks=0,good=0,invalid=0,duplicates=0;
+    unsigned char th[5],ids[255],cmap[255],hmap[255];
+    if(fseek(f,0,SEEK_SET)!=0)return 0;
+    if(fread(th,1,4,f)!=4 || memcmp(th,"IMD ",4)!=0) {
+        fprintf(stderr,"Invalid ImageDisk header\n");return 0;
+    }
+    /* A finite comment limit protects against malformed inputs. */
+    for(size_t n=4;n<65536;n++) {
+        c=fgetc(f);
+        if(c==0x1a){found_eof=1;break;}
+        if(c==EOF){break;}
+    }
+    if(!found_eof){fprintf(stderr,"Truncated/invalid ImageDisk comment header\n");return 0;}
+    memset(disk,0,sizeof disk);
+    memset(sector_status,0,sizeof sector_status);
+    image_is_imd=1;
+    for(;;) {
+        int mode=fgetc(f),cyl,headfield,count,sizecode,head;
+        if(mode==EOF)break;
+        cyl=fgetc(f);headfield=fgetc(f);count=fgetc(f);sizecode=fgetc(f);
+        if(cyl==EOF||headfield==EOF||count==EOF||sizecode==EOF||
+           mode>5||count==0||sizecode>6) {
+            fprintf(stderr,"Invalid ImageDisk track header (track record %d)\n",tracks);
+            return 0;
+        }
+        head=headfield&0x3f;
+        if(fread(ids,1,count,f)!=(size_t)count)goto truncated;
+        if(headfield&0x80) {
+            if(fread(cmap,1,count,f)!=(size_t)count)goto truncated;
+        } else memset(cmap,cyl,(size_t)count);
+        if(headfield&0x40) {
+            if(fread(hmap,1,count,f)!=(size_t)count)goto truncated;
+        } else memset(hmap,head,(size_t)count);
+        int sectorbytes=128<<sizecode;
+        for(int i=0;i<count;i++) {
+            int typ=fgetc(f),compressed,broken,valid, lba;
+            unsigned char data[8192],fill=0;
+            if(typ==EOF||typ>8)goto truncated;
+            compressed=(typ!=0 && (typ%2)==0);
+            broken=(typ>=5);
+            if(typ!=0) {
+                if(compressed) {
+                    c=fgetc(f);if(c==EOF)goto truncated;
+                    fill=(unsigned char)c;
+                    memset(data,fill,(size_t)sectorbytes);
+                } else if(fread(data,1,(size_t)sectorbytes,f)!=(size_t)sectorbytes)goto truncated;
+            }
+            valid=(mode==5 && sectorbytes==256 && cyl<80 && head==0 &&
+                   cmap[i]==cyl && hmap[i]==head && ids[i]<18);
+            if(!valid) {
+                /* Keep parsing other encodings/sides, but never map an
+                 * incompatible physical record into a VideoWriter sector. */
+                if(head!=0 || cyl>=80 || mode!=5 || sectorbytes!=256 ||
+                   cmap[i]!=cyl || hmap[i]!=head || ids[i]>=18)invalid++;
+                continue;
+            }
+            lba=addr(cyl,ids[i]);
+            if(sector_status[lba]) {
+                duplicates++;
+                if(typ==0 || broken)continue;
+                if(memcmp(sect(lba),data,256)!=0) {
+                    fprintf(stderr,"Conflicting duplicate sector %d:%d: refusing image\n",cyl,ids[i]);
+                    return 0;
+                }
+                continue;
+            }
+            if(typ==0 || broken)continue;
+            memcpy(sect(lba),data,256);
+            sector_status[lba]=1;
+            good++;
+        }
+        tracks++;
+    }
+    bad_sectors=1440-good;
+    printf("ImageDisk: %d tracks, %d reliable sectors, %d missing/CRC-bad, %d ignored incompatible records, %d duplicates\n",
+           tracks,good,bad_sectors,invalid,duplicates);
+    if(!good){fprintf(stderr,"No VideoWriter 250 sectors found in IMD image\n");return 0;}
+    return 1;
+truncated:
+    fprintf(stderr,"Truncated or malformed ImageDisk sector record\n");
+    return 0;
+}
+static int load_input_image(FILE *f) {
+    unsigned char magic[4];
+    if(fread(magic,1,4,f)!=4 || fseek(f,0,SEEK_SET)!=0)return 0;
+    if(memcmp(magic,"IMD ",4)==0)return load_imd_image(f);
+    return load_raw_image(f);
+}
+
 static void filename(char *out,const unsigned char *name){int i,j=0;for(i=0;i<20;i++){unsigned char c=name[i];if(c==0)break;if(c==' '){out[j++]='_';continue;}out[j++]=(isalnum(c)||c=='-'||c=='_'||c=='$')?c:'_';}while(j&&out[j-1]=='_')j--;out[j]=0;if(!j)strcpy(out,"unnamed");}
 static void write_text(FILE *f,const unsigned char *data,int len,int annotated,int rtf){int i=0,first=1;if(rtf)fputs("{\\rtf1\\ansi\\deff0\\paperw12240\\paperh15840\\margl1008\\margr1008\\margt1008\\margb1008{\\fonttbl{\\f0\\froman Times New Roman;}}\\f0\\fs22\\ql\n",f);
 while(i<len){unsigned char c=data[i];if(i+6<=len&&memcmp(data+i,"\x99\x00\x00\x02\x04\x9b",6)==0){if(!first){fputs(rtf?"\\par\n":"\n",f);}i+=6;first=0;continue;}if(i+5<=len&&memcmp(data+i,"\x00\x00\x02\x04\x9b",5)==0){i+=5;continue;}if(i+3<=len&&memcmp(data+i,"\x02\x04\x9b",3)==0){i+=3;continue;}i++;if(c==0x99){fputs(rtf?"\\par\n":"\n",f);first=0;continue;}if(c>=32&&c<=126){if(rtf&&(c=='\\'||c=='{'||c=='}'))fputc('\\',f);fputc(c,f);first=0;continue;}if(c&&annotated)fprintf(f,"<%02X>",c);else if(c&&rtf)fprintf(f,"{\\*\\vwctrl %02X}",c);}
@@ -116,7 +225,7 @@ static int temp_image(char *path, size_t size) {
 }
 int main(int argc,char **argv){FILE *f;char tempimg[1024]={0};const char *input;int fromdrive=0;const char *cmd="extract",*out="vw_output",*drive="0";int g,slot,allocated=0,success=0,skipped=0; int seen[1440]={0};
 int arg=2;
-if(argc<2||argc>5){fprintf(stderr,"Usage: vwrecover drive [0|1|2|A|B] [list|extract] [OUTPUT_DIR]\n       vwrecover IMAGE.img [list|extract] [OUTPUT_DIR]\n");return 2;}
+if(argc<2||argc>5){fprintf(stderr,"Usage: vwrecover drive [0|1|2|A|B] [list|extract] [OUTPUT_DIR]\n       vwrecover IMAGE.img|IMAGE.imd [list|extract] [OUTPUT_DIR]\n");return 2;}
 input=argv[1];
 if(strcmp(input,"drive")==0){
     const char *gw=getenv("VW_GW");
@@ -134,7 +243,7 @@ if(arg<argc) cmd=argv[arg++];
 if(strcmp(cmd,"list")&&strcmp(cmd,"extract")){fprintf(stderr,"Unknown command\n");return 2;}
 if(arg<argc) out=argv[arg++];
 if(arg<argc){fprintf(stderr,"Too many arguments\n");return 2;}
-f=fopen(input,"rb");if(!f){perror(argv[1]);return 1;}if(fread(disk,1,SZ,f)!=SZ||fgetc(f)!=EOF){fprintf(stderr,"Invalid image size; expected 368640 bytes\n");fclose(f);return 1;}fclose(f);if(fromdrive)remove(tempimg);if(!looks_like_videowriter()){fprintf(stderr,"Image does not contain a recognizable VideoWriter allocation map and directory\n");return 1;}for(int i=0;i<1440;i++)allocated+=used(i);printf("VideoWriter 250 | 80 tracks, 18 sectors/track, 256 bytes/sector | allocated %d/1440\n",allocated);
+f=fopen(input,"rb");if(!f){perror(argv[1]);return 1;}if(!load_input_image(f)){fclose(f);return 1;}fclose(f);if(fromdrive)remove(tempimg);if(!sector_good(0)||!sector_good(1)){fprintf(stderr,"Allocation bitmap or user directory missing/damaged; cannot safely extract\n");return 1;}if(!looks_like_videowriter()){fprintf(stderr,"Image does not contain a recognizable VideoWriter allocation map and directory\n");return 1;}for(int i=0;i<1440;i++)allocated+=used(i);printf("VideoWriter 250 | 80 tracks, 18 sectors/track, 256 bytes/sector | allocated %d/1440\n",allocated);
 if(!strcmp(cmd,"extract")){
     static char unique[1024];
     struct stat st;
@@ -151,7 +260,7 @@ if(!strcmp(cmd,"extract")){
     printf("Saving recovered documents in: %s\n",out);
 }
 for(g=0;g<2;g++)for(slot=0;slot<4;slot++){const unsigned char *r=sect(g?16:1)+64*slot;char name[64],stem[128];int t=r[26],s=r[27],lba=addr(t,s);if(!r[0])continue;filename(name,r+6);printf("%-6s slot=%d %-22s -> %02d:%02d  %s\n",g?"system":"user",slot,name,t,s,lba>=0?(used(lba)?"allocated":"FREE/STALE"):"INVALID");if(strcmp(cmd,"extract")||g)continue;
-if(lba<0||!used(lba)){printf("  skipped: header sector not allocated\n");skipped++;continue;}if(seen[lba]){printf("  alias: same document already recovered; skipping duplicate\n");continue;}seen[lba]=1;const unsigned char *h=sect(lba);int n=h[0]|(h[1]<<8),count=(n+255)/256;if(n<=0||count>127){printf("  skipped: invalid document byte count %d\n",n);skipped++;continue;}unsigned char *raw=malloc(count*256);if(!raw)return 1;int ok=1;for(int j=0;j<count;j++){int dt=h[2+2*j],ds=h[3+2*j],a=addr(dt,ds);if(a<0||!used(a)||a==lba){printf("  invalid data sector %d:%d (index %d)\n",dt,ds,j);ok=0;break;}memcpy(raw+j*256,sect(a),256);}if(ok){snprintf(stem,sizeof(stem),"%02d_%s",slot,name);{
+if(lba<0||!used(lba)||!sector_good(lba)){printf("  skipped: header sector free, unreadable or CRC-bad\n");skipped++;continue;}if(seen[lba]){printf("  alias: same document already recovered; skipping duplicate\n");continue;}seen[lba]=1;const unsigned char *h=sect(lba);int n=h[0]|(h[1]<<8),count=(n+255)/256;if(n<=0||count>127){printf("  skipped: invalid document byte count %d\n",n);skipped++;continue;}unsigned char *raw=malloc(count*256);if(!raw)return 1;int ok=1;for(int j=0;j<count;j++){int dt=h[2+2*j],ds=h[3+2*j],a=addr(dt,ds);if(a<0||!used(a)||a==lba||!sector_good(a)){printf("  missing, CRC-bad or invalid data sector %d:%d (index %d)\n",dt,ds,j);ok=0;break;}memcpy(raw+j*256,sect(a),256);}if(ok){snprintf(stem,sizeof(stem),"%02d_%s",slot,name);{
     int textoff=0,textlen=n;
     int shortdoc=short_document_text(raw,n,&textoff,&textlen);
     if(shortdoc) printf("  recognized short-document text record at +%d, %d bytes\n",textoff,textlen);
