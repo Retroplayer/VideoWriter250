@@ -41,6 +41,25 @@ jobs:
           if ($text -notmatch 'Grandma test note') { throw "Recovered text does not match fixture" }
           if (-not (Test-Path "$env:RUNNER_TEMP\recovered\00_Test_Document.rtf")) { throw "RTF missing" }
           Write-Host "Recovery fixture passed."
+
+          python tests/make_imd_fixture.py "$env:RUNNER_TEMP\fixture.img" "$env:RUNNER_TEMP\fixture.imd"
+          & .\build\vwrecover.exe "$env:RUNNER_TEMP\fixture.imd" extract "$env:RUNNER_TEMP\imd-recovered"
+          if ($LASTEXITCODE -ne 0) { throw "IMD extraction failed" }
+          $imdText = Get-Content "$env:RUNNER_TEMP\imd-recovered\00_Test_Document.txt" -Raw
+          if ($imdText -notmatch 'Grandma test note') { throw "IMD extracted text incorrect" }
+          Write-Host "IMD compressed/interleaved/sector-map regression passed."
+          python tests/make_imd_fixture.py "$env:RUNNER_TEMP\fixture.img" "$env:RUNNER_TEMP\bad.imd" bad-data
+          & .\build\vwrecover.exe "$env:RUNNER_TEMP\bad.imd" extract "$env:RUNNER_TEMP\bad-recovered"
+          if ($LASTEXITCODE -eq 0) { throw "CRC-bad document sector was falsely exported" }
+          $global:LASTEXITCODE = 0
+          if (Test-Path "$env:RUNNER_TEMP\bad-recovered\00_Test_Document.txt") { throw "Bad sector silently exported to text" }
+          Write-Host "IMD CRC-damaged sector rejection passed."
+          python tests/make_imd_fixture.py "$env:RUNNER_TEMP\fixture.img" "$env:RUNNER_TEMP\missing.imd" missing-data
+          & .\build\vwrecover.exe "$env:RUNNER_TEMP\missing.imd" extract "$env:RUNNER_TEMP\missing-recovered"
+          if ($LASTEXITCODE -eq 0) { throw "Missing document sector was falsely exported" }
+          $global:LASTEXITCODE = 0
+          if (Test-Path "$env:RUNNER_TEMP\missing-recovered\00_Test_Document.txt") { throw "Missing sector silently exported to text" }
+          Write-Host "IMD missing sector rejection passed."
           python tests/make_short_fixture.py "$env:RUNNER_TEMP\\short.img"
           & .\\build\\vwrecover.exe "$env:RUNNER_TEMP\\short.img" extract "$env:RUNNER_TEMP\\shortrecovered"
           if ($LASTEXITCODE -ne 0) { throw "Short-document extraction failed" }
