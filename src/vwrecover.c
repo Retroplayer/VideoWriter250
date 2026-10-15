@@ -49,13 +49,13 @@ while(i<len){unsigned char c=data[i];if(i+6<=len&&memcmp(data+i,"\x99\x00\x00\x0
 if(rtf)fputs("}\n",f);else fputc('\n',f);}
 static int save(const char *dir,const char *stem,const char *ext,const unsigned char *p,int len,int mode){char path[1024];FILE *f;snprintf(path,sizeof(path),"%s/%s.%s",dir,stem,ext);f=fopen(path,"wb");if(!f){perror(path);return 0;}if(mode==0){if(fwrite(p,1,len,f)!=(size_t)len){fclose(f);return 0;}}else write_text(f,p,len,mode==2,mode==3);if(fclose(f)!=0)return 0;return 1;}
 /* Capture combined stdout/stderr, but do not infer sector correctness from logs. */
-static int gw_read_capture(const char *gw, const char *path) {
+static int gw_read_capture(const char *gw, const char *path, const char *drive) {
     char command[4096], line[2048];
     int status;
     FILE *pipe;
     const char *extra=getenv("VW_GW_EXTRA");
     if (!extra) extra="";
-    if (snprintf(command,sizeof command,"\"%s\" read --format=ibm.scan --tracks=c=0-79:h=0 --retries=5 %s \"%s\" 2>&1",gw,extra,path)>=(int)sizeof command) return -1;
+    if (snprintf(command,sizeof command,"\"%s\" read --format=ibm.scan --tracks=c=0-79:h=0 --retries=5 --drive=%s %s \"%s\" 2>&1",gw,drive,extra,path)>=(int)sizeof command) return -1;
 #ifdef _WIN32
     pipe=_popen(command,"r");
 #else
@@ -96,18 +96,27 @@ static int temp_image(char *path, size_t size) {
     return 1;
 #endif
 }
-int main(int argc,char **argv){FILE *f;char tempimg[1024]={0};const char *input;int fromdrive=0;const char *cmd,*out="vw_output";int g,slot,allocated=0,success=0,skipped=0; int seen[1440]={0};
-if(argc<2||argc>4){fprintf(stderr,"Usage: vwrecover [drive|IMAGE.img] [list|extract] [OUTPUT_DIR]\n");return 2;}
+int main(int argc,char **argv){FILE *f;char tempimg[1024]={0};const char *input;int fromdrive=0;const char *cmd="extract",*out="vw_output",*drive="0";int g,slot,allocated=0,success=0,skipped=0; int seen[1440]={0};
+int arg=2;
+if(argc<2||argc>5){fprintf(stderr,"Usage: vwrecover drive [0|1|2|A|B] [list|extract] [OUTPUT_DIR]\n       vwrecover IMAGE.img [list|extract] [OUTPUT_DIR]\n");return 2;}
 input=argv[1];
 if(strcmp(input,"drive")==0){
     const char *gw=getenv("VW_GW");
+    if(arg<argc && (strcmp(argv[arg],"0")==0||strcmp(argv[arg],"1")==0||strcmp(argv[arg],"2")==0||strcmp(argv[arg],"A")==0||strcmp(argv[arg],"B")==0||strcmp(argv[arg],"a")==0||strcmp(argv[arg],"b")==0)) drive=argv[arg++];
+    else if(arg<argc && strcmp(argv[arg],"extract")!=0 && strcmp(argv[arg],"list")!=0){
+        fprintf(stderr,"Invalid drive selector: %s (use 0, 1, 2, A or B)\n",argv[arg]);return 2;
+    }
     if(!gw||!*gw) gw="gw.exe";
     if(!temp_image(tempimg,sizeof tempimg)){fprintf(stderr,"Cannot allocate temporary image path\n");return 1;}
-    puts("Reading VideoWriter disk with Greaseweazle...");fflush(stdout);
-    if(gw_read_capture(gw,tempimg)!=0){fprintf(stderr,"Greaseweazle could not complete the disk read.\n");remove(tempimg);return 1;}
+    printf("Reading VideoWriter disk with Greaseweazle, drive %s...\n",drive);fflush(stdout);
+    if(gw_read_capture(gw,tempimg,drive)!=0){fprintf(stderr,"Greaseweazle could not complete the disk read.\n");remove(tempimg);return 1;}
     input=tempimg;fromdrive=1;
 }
-cmd=argc>=3?argv[2]:"extract";if(strcmp(cmd,"list")&&strcmp(cmd,"extract")){fprintf(stderr,"Unknown command\n");return 2;}if(argc==4)out=argv[3];f=fopen(input,"rb");if(!f){perror(argv[1]);return 1;}if(fread(disk,1,SZ,f)!=SZ||fgetc(f)!=EOF){fprintf(stderr,"Invalid image size; expected 368640 bytes\n");fclose(f);return 1;}fclose(f);if(fromdrive)remove(tempimg);if(!looks_like_videowriter()){fprintf(stderr,"Image does not contain a recognizable VideoWriter allocation map and directory\n");return 1;}for(int i=0;i<1440;i++)allocated+=used(i);printf("VideoWriter 250 | 80 tracks, 18 sectors/track, 256 bytes/sector | allocated %d/1440\n",allocated);
+if(arg<argc) cmd=argv[arg++];
+if(strcmp(cmd,"list")&&strcmp(cmd,"extract")){fprintf(stderr,"Unknown command\n");return 2;}
+if(arg<argc) out=argv[arg++];
+if(arg<argc){fprintf(stderr,"Too many arguments\n");return 2;}
+f=fopen(input,"rb");if(!f){perror(argv[1]);return 1;}if(fread(disk,1,SZ,f)!=SZ||fgetc(f)!=EOF){fprintf(stderr,"Invalid image size; expected 368640 bytes\n");fclose(f);return 1;}fclose(f);if(fromdrive)remove(tempimg);if(!looks_like_videowriter()){fprintf(stderr,"Image does not contain a recognizable VideoWriter allocation map and directory\n");return 1;}for(int i=0;i<1440;i++)allocated+=used(i);printf("VideoWriter 250 | 80 tracks, 18 sectors/track, 256 bytes/sector | allocated %d/1440\n",allocated);
 if(!strcmp(cmd,"extract")){
     static char unique[1024];
     struct stat st;

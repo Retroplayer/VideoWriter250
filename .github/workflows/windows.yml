@@ -41,6 +41,10 @@ jobs:
           if ($text -notmatch 'Grandma test note') { throw "Recovered text does not match fixture" }
           if (-not (Test-Path "$env:RUNNER_TEMP\recovered\00_Test_Document.rtf")) { throw "RTF missing" }
           Write-Host "Recovery fixture passed."
+          & .\build\vwrecover.exe drive 9 extract
+          if ($LASTEXITCODE -ne 2) { throw "Invalid drive selector was not rejected" }
+          $global:LASTEXITCODE = 0
+          Write-Host "Drive selector validation passed."
 
       - name: Package Windows build
         shell: pwsh
