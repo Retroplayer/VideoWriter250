@@ -47,6 +47,24 @@ static void filename(char *out,const unsigned char *name){int i,j=0;for(i=0;i<20
 static void write_text(FILE *f,const unsigned char *data,int len,int annotated,int rtf){int i=0,first=1;if(rtf)fputs("{\\rtf1\\ansi\\deff0\\paperw12240\\paperh15840\\margl1008\\margr1008\\margt1008\\margb1008{\\fonttbl{\\f0\\froman Times New Roman;}}\\f0\\fs22\\ql\n",f);
 while(i<len){unsigned char c=data[i];if(i+6<=len&&memcmp(data+i,"\x99\x00\x00\x02\x04\x9b",6)==0){if(!first){fputs(rtf?"\\par\n":"\n",f);}i+=6;first=0;continue;}if(i+5<=len&&memcmp(data+i,"\x00\x00\x02\x04\x9b",5)==0){i+=5;continue;}if(i+3<=len&&memcmp(data+i,"\x02\x04\x9b",3)==0){i+=3;continue;}i++;if(c==0x99){fputs(rtf?"\\par\n":"\n",f);first=0;continue;}if(c>=32&&c<=126){if(rtf&&(c=='\\'||c=='{'||c=='}'))fputc('\\',f);fputc(c,f);first=0;continue;}if(c&&annotated)fprintf(f,"<%02X>",c);else if(c&&rtf)fprintf(f,"{\\*\\vwctrl %02X}",c);}
 if(rtf)fputs("}\n",f);else fputc('\n',f);}
+/* Short-document data records observed in VW1: header 01 00,
+ * 25 zero bytes, FF, text bytes, and 96 01 terminator.
+ * Keep BIN/annotated raw; select only the recognized text span for TXT/RTF.
+ * This is deliberately NOT a generic control-code interpreter.
+ */
+static int short_document_text(const unsigned char *raw,int len,int *offset,int *length) {
+    int i;
+    if(len<31 || raw[0]!=1 || raw[1]!=0 || raw[27]!=0xff) return 0;
+    for(i=2;i<27;i++) if(raw[i]!=0) return 0;
+    for(i=28;i+1<len;i++) {
+        if(raw[i]==0x96 && raw[i+1]==0x01) {
+            *offset=28;
+            *length=i-28;
+            return 1;
+        }
+    }
+    return 0;
+}
 static int save(const char *dir,const char *stem,const char *ext,const unsigned char *p,int len,int mode){char path[1024];FILE *f;snprintf(path,sizeof(path),"%s/%s.%s",dir,stem,ext);f=fopen(path,"wb");if(!f){perror(path);return 0;}if(mode==0){if(fwrite(p,1,len,f)!=(size_t)len){fclose(f);return 0;}}else write_text(f,p,len,mode==2,mode==3);if(fclose(f)!=0)return 0;return 1;}
 /* Capture combined stdout/stderr, but do not infer sector correctness from logs. */
 static int gw_read_capture(const char *gw, const char *path, const char *drive) {
@@ -133,5 +151,13 @@ if(!strcmp(cmd,"extract")){
     printf("Saving recovered documents in: %s\n",out);
 }
 for(g=0;g<2;g++)for(slot=0;slot<4;slot++){const unsigned char *r=sect(g?16:1)+64*slot;char name[64],stem[128];int t=r[26],s=r[27],lba=addr(t,s);if(!r[0])continue;filename(name,r+6);printf("%-6s slot=%d %-22s -> %02d:%02d  %s\n",g?"system":"user",slot,name,t,s,lba>=0?(used(lba)?"allocated":"FREE/STALE"):"INVALID");if(strcmp(cmd,"extract")||g)continue;
-if(lba<0||!used(lba)){printf("  skipped: header sector not allocated\n");skipped++;continue;}if(seen[lba]){printf("  alias: same document already recovered; skipping duplicate\n");continue;}seen[lba]=1;const unsigned char *h=sect(lba);int n=h[0]|(h[1]<<8),count=(n+255)/256;if(n<=0||count>127){printf("  skipped: invalid document byte count %d\n",n);skipped++;continue;}unsigned char *raw=malloc(count*256);if(!raw)return 1;int ok=1;for(int j=0;j<count;j++){int dt=h[2+2*j],ds=h[3+2*j],a=addr(dt,ds);if(a<0||!used(a)||a==lba){printf("  invalid data sector %d:%d (index %d)\n",dt,ds,j);ok=0;break;}memcpy(raw+j*256,sect(a),256);}if(ok){snprintf(stem,sizeof(stem),"%02d_%s",slot,name);ok=save(out,stem,"bin",raw,n,0)&&save(out,stem,"txt",raw,n,1)&&save(out,stem,"annotated.txt",raw,n,2)&&save(out,stem,"rtf",raw,n,3);if(ok){success++;printf("  extracted %d bytes across %d sectors\n",n,count);}}if(!ok)skipped++;free(raw);}
+if(lba<0||!used(lba)){printf("  skipped: header sector not allocated\n");skipped++;continue;}if(seen[lba]){printf("  alias: same document already recovered; skipping duplicate\n");continue;}seen[lba]=1;const unsigned char *h=sect(lba);int n=h[0]|(h[1]<<8),count=(n+255)/256;if(n<=0||count>127){printf("  skipped: invalid document byte count %d\n",n);skipped++;continue;}unsigned char *raw=malloc(count*256);if(!raw)return 1;int ok=1;for(int j=0;j<count;j++){int dt=h[2+2*j],ds=h[3+2*j],a=addr(dt,ds);if(a<0||!used(a)||a==lba){printf("  invalid data sector %d:%d (index %d)\n",dt,ds,j);ok=0;break;}memcpy(raw+j*256,sect(a),256);}if(ok){snprintf(stem,sizeof(stem),"%02d_%s",slot,name);{
+    int textoff=0,textlen=n;
+    int shortdoc=short_document_text(raw,n,&textoff,&textlen);
+    if(shortdoc) printf("  recognized short-document text record at +%d, %d bytes\n",textoff,textlen);
+    ok=save(out,stem,"bin",raw,n,0)&&
+       save(out,stem,"annotated.txt",raw,n,2)&&
+       save(out,stem,"txt",raw+textoff,textlen,1)&&
+       save(out,stem,"rtf",raw+textoff,textlen,3);
+}if(ok){success++;printf("  extracted %d bytes across %d sectors\n",n,count);}}if(!ok)skipped++;free(raw);}
 if(!strcmp(cmd,"extract")){printf("Extracted %d entries; skipped %d unresolved/stale entries. Read-only; source unchanged.\n",success,skipped);if(success==0){fprintf(stderr,"No recoverable documents found.\n");return 1;}}return 0;}

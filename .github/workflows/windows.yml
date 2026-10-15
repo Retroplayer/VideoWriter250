@@ -41,6 +41,14 @@ jobs:
           if ($text -notmatch 'Grandma test note') { throw "Recovered text does not match fixture" }
           if (-not (Test-Path "$env:RUNNER_TEMP\recovered\00_Test_Document.rtf")) { throw "RTF missing" }
           Write-Host "Recovery fixture passed."
+          python tests/make_short_fixture.py "$env:RUNNER_TEMP\\short.img"
+          & .\\build\\vwrecover.exe "$env:RUNNER_TEMP\\short.img" extract "$env:RUNNER_TEMP\\shortrecovered"
+          if ($LASTEXITCODE -ne 0) { throw "Short-document extraction failed" }
+          $shortText = Get-Content "$env:RUNNER_TEMP\\shortrecovered\\00_Document1.txt" -Raw
+          if ($shortText.TrimEnd() -cne 'Hello World!') { throw "Short-document text contains wrong bytes: $shortText" }
+          $raw = [System.IO.File]::ReadAllBytes("$env:RUNNER_TEMP\\shortrecovered\\00_Document1.bin")
+          if ($raw.Length -ne 70 -or $raw[27] -ne 255) { throw "Lossless raw document changed" }
+          Write-Host "VW1 short-document regression passed."
           & .\build\vwrecover.exe drive 9 extract
           if ($LASTEXITCODE -ne 2) { throw "Invalid drive selector was not rejected" }
           $global:LASTEXITCODE = 0
