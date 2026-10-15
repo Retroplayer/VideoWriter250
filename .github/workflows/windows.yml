@@ -1,0 +1,55 @@
+name: Windows recovery build
+
+on:
+  push:
+    branches: [main, feature/windows-recovery-build]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure Visual C++ environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build Windows x64 executable
+        shell: cmd
+        run: |
+          if not exist build mkdir build
+          cl /nologo /W3 /O2 /std:c11 /Fe:build\vwrecover.exe src\vwrecover.c
+
+      - name: Create synthetic filesystem test disk
+        shell: pwsh
+        run: python tests/make_fixture.py "$env:RUNNER_TEMP\fixture.img"
+
+      - name: Run recovery smoke test
+        shell: pwsh
+        run: |
+          & .\build\vwrecover.exe "$env:RUNNER_TEMP\fixture.img" extract "$env:RUNNER_TEMP\recovered"
+          if ($LASTEXITCODE -ne 0) { throw "Recovery command failed" }
+          $text = Get-Content "$env:RUNNER_TEMP\recovered\00_Test_Document.txt" -Raw
+          if ($text -notmatch 'Grandma test note') { throw "Recovered text does not match fixture" }
+          if (-not (Test-Path "$env:RUNNER_TEMP\recovered\00_Test_Document.rtf")) { throw "RTF missing" }
+          Write-Host "Recovery fixture passed."
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item build\vwrecover.exe release\vwrecover.exe
+          Copy-Item README.md release\README.md
+          Compress-Archive -Path release\* -DestinationPath vwrecover-windows-x64.zip
+
+      - name: Upload downloadable Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vwrecover-windows-x64
+          path: vwrecover-windows-x64.zip
+          if-no-files-found: error
