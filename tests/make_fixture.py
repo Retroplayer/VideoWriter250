@@ -8,10 +8,10 @@ from pathlib import Path
 SECTOR = 256
 SPT = 18
 image = bytearray(80 * SPT * SECTOR)
-image[0xBE:0xC0] = b"WV"
+image[0xBE:0xC0] = b"5F"  # genuine document disks need not contain WV
 header = 31 * SPT + 1
 data = header + 1
-for sector in (header, data):
+for sector in (0, 1, header, data):
     image[sector // 8] |= 1 << (sector % 8)
 
 directory = SECTOR

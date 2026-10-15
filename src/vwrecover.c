@@ -22,6 +22,27 @@ static unsigned char disk[SZ];
 static int used(int lba){return (disk[lba/8]>>(lba%8))&1;}
 static int addr(int t,int s){return t>=0&&t<80&&s>=0&&s<18?t*18+s:-1;}
 static unsigned char *sect(int lba){return disk+lba*SS;}
+/* There are genuine VideoWriter document disks with no 'WV' identifier.
+ * Recognize the disk by its directory and allocation structures instead.
+ * Do not assume a readable directory entry proves the document is recoverable.
+ */
+static int looks_like_videowriter(void) {
+    int i, plausible = 0;
+    if (!used(0) || !used(1)) return 0;
+    for (i=0; i<4; i++) {
+        const unsigned char *r=sect(1)+64*i;
+        int j, has_name=0, a;
+        if (r[0]==0) continue;
+        for (j=6;j<26;j++) {
+            if (r[j] && (r[j]<32 || r[j]>126)) return 0;
+            if (r[j]!=' ' && r[j]!=0) has_name=1;
+        }
+        a=addr(r[26],r[27]);
+        if (!has_name || a<0 || !used(a)) continue;
+        plausible++;
+    }
+    return plausible>0;
+}
 static void filename(char *out,const unsigned char *name){int i,j=0;for(i=0;i<20;i++){unsigned char c=name[i];if(c==0)break;if(c==' '){out[j++]='_';continue;}out[j++]=(isalnum(c)||c=='-'||c=='_'||c=='$')?c:'_';}while(j&&out[j-1]=='_')j--;out[j]=0;if(!j)strcpy(out,"unnamed");}
 static void write_text(FILE *f,const unsigned char *data,int len,int annotated,int rtf){int i=0,first=1;if(rtf)fputs("{\\rtf1\\ansi\\deff0\\paperw12240\\paperh15840\\margl1008\\margr1008\\margt1008\\margb1008{\\fonttbl{\\f0\\froman Times New Roman;}}\\f0\\fs22\\ql\n",f);
 while(i<len){unsigned char c=data[i];if(i+6<=len&&memcmp(data+i,"\x99\x00\x00\x02\x04\x9b",6)==0){if(!first){fputs(rtf?"\\par\n":"\n",f);}i+=6;first=0;continue;}if(i+5<=len&&memcmp(data+i,"\x00\x00\x02\x04\x9b",5)==0){i+=5;continue;}if(i+3<=len&&memcmp(data+i,"\x02\x04\x9b",3)==0){i+=3;continue;}i++;if(c==0x99){fputs(rtf?"\\par\n":"\n",f);first=0;continue;}if(c>=32&&c<=126){if(rtf&&(c=='\\'||c=='{'||c=='}'))fputc('\\',f);fputc(c,f);first=0;continue;}if(c&&annotated)fprintf(f,"<%02X>",c);else if(c&&rtf)fprintf(f,"{\\*\\vwctrl %02X}",c);}
@@ -86,7 +107,7 @@ if(strcmp(input,"drive")==0){
     if(gw_read_capture(gw,tempimg)!=0){fprintf(stderr,"Greaseweazle could not complete the disk read.\n");remove(tempimg);return 1;}
     input=tempimg;fromdrive=1;
 }
-cmd=argc>=3?argv[2]:"extract";if(strcmp(cmd,"list")&&strcmp(cmd,"extract")){fprintf(stderr,"Unknown command\n");return 2;}if(argc==4)out=argv[3];f=fopen(input,"rb");if(!f){perror(argv[1]);return 1;}if(fread(disk,1,SZ,f)!=SZ||fgetc(f)!=EOF){fprintf(stderr,"Invalid image size; expected 368640 bytes\n");fclose(f);return 1;}fclose(f);if(fromdrive)remove(tempimg);if(memcmp(disk+0xbe,"WV",2)){fprintf(stderr,"Missing VideoWriter WV signature at 0xBE\n");return 1;}for(int i=0;i<1440;i++)allocated+=used(i);printf("VideoWriter 250 | 80 tracks, 18 sectors/track, 256 bytes/sector | allocated %d/1440\n",allocated);
+cmd=argc>=3?argv[2]:"extract";if(strcmp(cmd,"list")&&strcmp(cmd,"extract")){fprintf(stderr,"Unknown command\n");return 2;}if(argc==4)out=argv[3];f=fopen(input,"rb");if(!f){perror(argv[1]);return 1;}if(fread(disk,1,SZ,f)!=SZ||fgetc(f)!=EOF){fprintf(stderr,"Invalid image size; expected 368640 bytes\n");fclose(f);return 1;}fclose(f);if(fromdrive)remove(tempimg);if(!looks_like_videowriter()){fprintf(stderr,"Image does not contain a recognizable VideoWriter allocation map and directory\n");return 1;}for(int i=0;i<1440;i++)allocated+=used(i);printf("VideoWriter 250 | 80 tracks, 18 sectors/track, 256 bytes/sector | allocated %d/1440\n",allocated);
 if(!strcmp(cmd,"extract")){
     static char unique[1024];
     struct stat st;
