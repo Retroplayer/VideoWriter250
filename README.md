@@ -14,6 +14,14 @@ Read-only Windows console utility intended to rescue writings from Magnavox Vide
    vwrecover.exe drive extract recovered
    ```
 
+Drive **0** is selected by default. For a second drive, supply its number immediately after `drive`:
+
+```cmd
+vwrecover.exe drive 1 extract recovered
+```
+
+Greaseweazle also accepts drive selectors `2`, `A`, and `B` (depending on the floppy cable and drive configuration). The supplied selector is passed as `--drive=<selector>` to `gw.exe`.
+
 The program calls `gw.exe`, then extracts documents into a newly created `recovered` directory inside the current folder. If that folder already exists, a numbered directory is chosen to avoid overwriting earlier results.
 
 Documents are saved individually as TXT, RTF, annotated text, and lossless binary. **TXT is the priority; RTF formatting support is incomplete.** Do not edit or discard the original floppy.
