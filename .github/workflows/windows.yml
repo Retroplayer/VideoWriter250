@@ -43,6 +43,7 @@ jobs:
           Write-Host "Recovery fixture passed."
           & .\build\vwrecover.exe drive 9 extract
           if ($LASTEXITCODE -ne 2) { throw "Invalid drive selector was not rejected" }
+          $global:LASTEXITCODE = 0
           Write-Host "Drive selector validation passed."
 
       - name: Package Windows build
